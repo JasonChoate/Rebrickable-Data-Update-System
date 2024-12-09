@@ -1,0 +1,18 @@
+version: "3.5"
+
+networks:
+  public_net:
+    external: true
+    name: shared_public_net
+
+services:
+  maintenance:
+    build: .
+    container_name: data-maintenance
+    volumes:
+      - .:/app
+      - ./temp:/app/temp
+      - ./sql_output:/app/sql_output
+      - ./logs:/app/logs
+    networks:
+      - public_net
