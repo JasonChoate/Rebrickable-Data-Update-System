@@ -17,6 +17,25 @@ Automated system to fetch and import LEGO database updates from Rebrickable.com 
     └── logs/          # Operation logs
 ```
 
+## Database Schema
+Most tables follow Rebrickable's schema as defined in their CSV files. However, this system adds one custom table:
+
+### recent_set_additions
+Tracks newly added sets per theme (automatically created if not present)
+```sql
+CREATE TABLE recent_set_additions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    set_num VARCHAR(20),
+    theme_id INT,
+    added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (set_num) REFERENCES sets(set_num),
+    FOREIGN KEY (theme_id) REFERENCES themes(id)
+)
+```
+Stores up to 3 most recent sets per theme. Records persist until new sets are available for that theme.
+
+For Rebrickable's schema documentation, visit: https://rebrickable.com/downloads/
+
 ## Setup
 
 1. Create the maintenance directory:

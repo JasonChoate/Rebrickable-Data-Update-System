@@ -68,55 +68,95 @@ def download_and_extract_files():
             os.remove(gz_path)
 
 def execute_sql_files(host, user, password, database):
-   """Execute all generated SQL files against the database."""
-   try:
-       conn = mysql.connector.connect(
-           host=host,
-           user=user,
-           password=password, 
-           database=database
-       )
-       cursor = conn.cursor()
-       
-       # Define order based on dependencies
-       order = ['themes', 'sets', 'minifigs', 'inventories', 'inventory_minifigs', 'inventory_sets']
-       
-       # Get list of SQL files in correct order
-       sql_files = []
-       for table in order:
-           file = f"{table}_inserts.sql"
-           if file in os.listdir(SQL_OUTPUT_DIR):
-               sql_files.append(file)
-       
-       # Execute files in order
-       for sql_file in sql_files:
-           file_path = os.path.join(SQL_OUTPUT_DIR, sql_file)
-           logger.info(f"Executing SQL file: {sql_file}")
-           
-           with open(file_path, 'r', encoding='utf-8') as f:
-               sql_commands = f.read().split(';')
-               
-               for command in sql_commands:
-                   if command.strip():
-                       try:
-                           cursor.execute(command)
-                           conn.commit()
-                       except mysql.connector.Error as err:
-                           logger.error(f"Error executing SQL: {err}")
-                           # Continue with next command
-                           continue
-       
-       cursor.close()
-       conn.close()
-   except mysql.connector.Error as err:
-       logger.error(f"Database connection error: {err}")
-       raise
+    """Execute all generated SQL files against the database."""
+    try:
+        conn = mysql.connector.connect(
+            host=host, user=user, password=password, database=database
+        )
+        cursor = conn.cursor()
+        
+        # Check and create recent_set_additions table if it doesn't exist
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS recent_set_additions (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                set_num VARCHAR(20),
+                theme_id INT,
+                added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (set_num) REFERENCES sets(set_num),
+                FOREIGN KEY (theme_id) REFERENCES themes(id)
+            )
+        """)
+        conn.commit()
+        
+        # Before inserting new data, capture existing set numbers
+        cursor.execute("CREATE TEMPORARY TABLE existing_sets AS SELECT set_num FROM sets")
+        conn.commit()
+        
+        # Define order based on dependencies
+        order = ['themes', 'sets', 'minifigs', 'inventories', 'inventory_minifigs', 'inventory_sets']
+        
+        # Execute files in order
+        for table in order:
+            file = f"{table}_inserts.sql"
+            if file in os.listdir(SQL_OUTPUT_DIR):
+                file_path = os.path.join(SQL_OUTPUT_DIR, file)
+                logger.info(f"Executing SQL file: {file}")
+                
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    sql_commands = f.read().split(';')
+                    
+                    for command in sql_commands:
+                        if command.strip():
+                            try:
+                                cursor.execute(command)
+                                conn.commit()
+                            except mysql.connector.Error as err:
+                                logger.error(f"Error executing SQL: {err}")
+                                continue
+                                
+        # Find and delete records for themes that have new sets
+        cursor.execute("""
+            DELETE r FROM recent_set_additions r
+            WHERE EXISTS (
+                SELECT 1 FROM sets s
+                LEFT JOIN existing_sets e ON s.set_num = e.set_num
+                WHERE e.set_num IS NULL
+                AND s.theme_id = r.theme_id
+            )
+        """)
+        conn.commit()
+        
+        # Insert new sets for those themes
+        cursor.execute("""
+            INSERT INTO recent_set_additions (set_num, theme_id)
+            SELECT s.set_num, s.theme_id
+            FROM sets s
+            LEFT JOIN existing_sets e ON s.set_num = e.set_num
+            WHERE e.set_num IS NULL
+            AND (
+                SELECT COUNT(*)
+                FROM recent_set_additions r2
+                WHERE r2.theme_id = s.theme_id
+            ) < 3
+            ORDER BY s.year DESC, s.set_num DESC
+        """)
+        conn.commit()
+        
+        cursor.execute("DROP TEMPORARY TABLE existing_sets")
+        conn.commit()
+        
+        return cursor, conn
+        
+    except mysql.connector.Error as err:
+        logger.error(f"Database connection error: {err}")
+        raise
 
 def cleanup():
     """Clean up temporary files."""
     logger.info("Cleaning up temporary files")
     for file in os.listdir(TEMP_DIR):
-        os.remove(os.path.join(TEMP_DIR, file))
+        if file != '.gitkeep':  # Skip .gitkeep files
+            os.remove(os.path.join(TEMP_DIR, file))
 
 def main():
     try:
@@ -139,7 +179,8 @@ def main():
         os.system(f'python3 generate_sql_insert.py')
         
         # Execute SQL files
-        execute_sql_files(db_host, db_user, db_pass, db_name)
+        cursor, conn = execute_sql_files(db_host, db_user, db_pass, db_name)
+        conn.close()
         
         # Cleanup
         cleanup()
