@@ -75,27 +75,44 @@ def execute_sql_files(host, user, password, database):
         )
         cursor = conn.cursor()
         
-        # Check and create recent_set_additions table if it doesn't exist
+        # Existing table checks - Add popular_themes check here
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS popular_themes (
+                id int NOT NULL AUTO_INCREMENT,
+                theme_id int NOT NULL,
+                collection_count int NOT NULL,
+                snapshot_date timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY theme_id (theme_id),
+                KEY snapshot_date (snapshot_date),
+                CONSTRAINT popular_themes_ibfk_1 FOREIGN KEY (theme_id) REFERENCES themes (id)
+            )
+        """)
+        conn.commit()
+
+        # Add recent_set_additions table check
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS recent_set_additions (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                set_num VARCHAR(20),
-                theme_id INT,
-                added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (set_num) REFERENCES sets(set_num),
-                FOREIGN KEY (theme_id) REFERENCES themes(id)
+                id int NOT NULL AUTO_INCREMENT,
+                set_num varchar(20) DEFAULT NULL,
+                theme_id int DEFAULT NULL,
+                added_date timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY set_num (set_num),
+                KEY theme_id (theme_id),
+                CONSTRAINT recent_set_additions_ibfk_1 FOREIGN KEY (set_num) REFERENCES sets (set_num),
+                CONSTRAINT recent_set_additions_ibfk_2 FOREIGN KEY (theme_id) REFERENCES themes (id)
             )
         """)
         conn.commit()
         
-        # Before inserting new data, capture existing set numbers
+        # Create temporary table for existing sets (existing code)
         cursor.execute("CREATE TEMPORARY TABLE existing_sets AS SELECT set_num FROM sets")
         conn.commit()
         
-        # Define order based on dependencies
+        # Execute files in order (existing code)
         order = ['themes', 'sets', 'minifigs', 'inventories', 'inventory_minifigs', 'inventory_sets']
         
-        # Execute files in order
         for table in order:
             file = f"{table}_inserts.sql"
             if file in os.listdir(SQL_OUTPUT_DIR):
@@ -113,8 +130,8 @@ def execute_sql_files(host, user, password, database):
                             except mysql.connector.Error as err:
                                 logger.error(f"Error executing SQL: {err}")
                                 continue
-                                
-        # Find and delete records for themes that have new sets
+        
+        # Update recent_set_additions
         cursor.execute("""
             DELETE r FROM recent_set_additions r
             WHERE EXISTS (
@@ -126,7 +143,6 @@ def execute_sql_files(host, user, password, database):
         """)
         conn.commit()
         
-        # Insert new sets for those themes
         cursor.execute("""
             INSERT INTO recent_set_additions (set_num, theme_id)
             SELECT s.set_num, s.theme_id
@@ -141,6 +157,33 @@ def execute_sql_files(host, user, password, database):
             ORDER BY s.year DESC, s.set_num DESC
         """)
         conn.commit()
+        
+        # Update popular themes
+        logger.info("Updating popular themes statistics")
+        try:
+            cursor.execute("""
+                INSERT INTO popular_themes (theme_id, collection_count)
+                SELECT 
+                    t.id AS theme_id,
+                    SUM(c.collection_set_quantity) AS collection_count
+                FROM themes t
+                JOIN sets s ON s.theme_id = t.id
+                JOIN collection c ON c.set_num = s.set_num
+                GROUP BY t.id
+                ORDER BY collection_count DESC
+                LIMIT 5
+            """)
+            conn.commit()
+            
+            # Clean up old records
+            cursor.execute("""
+                DELETE FROM popular_themes 
+                WHERE snapshot_date < DATE_SUB(NOW(), INTERVAL 12 WEEK)
+            """)
+            conn.commit()
+            
+        except mysql.connector.Error as err:
+            logger.error(f"Error updating popular themes: {err}")
         
         cursor.execute("DROP TEMPORARY TABLE existing_sets")
         conn.commit()
